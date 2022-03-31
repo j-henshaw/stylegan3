@@ -9,7 +9,7 @@ Please see the main [StyleGAN3](https://github.com/NVlabs/stylegan3) branch for 
 
 This fork is an in-progress modification of StyleGAN3 which aims to utilize StyleGAN3 for generation of instances of a lossless audio spectrogram. These spectrograms are then reverse-transformed back into audio, thus allowing StyleGAN3 to be trained on a set of audio files and then generate its own, unique sounds. The current implementation is messy and incomplete. As it stands, the network diverges quite rapidly towards brightness and monochromaticity, though there are many areas still to be worked on. For more in-depth information on these modifications, please see my paper [Generating Sounds that Don't Exist](https://www.dropbox.com/s/51gqnopiid6c7nc/ML_Final_Report.pdf?dl=0).
 
-What follows are instructions on how to reproduce the experiments described in this paper. However, it should be possible to run with any audio dataset.
+What follows are instructions on how to reproduce the experiments described in this paper. However, it should be possible to run with any audio dataset with simple modifications.
 
 
 ## Instructions<br><sub>StyleGAN3-Spectrogram, Jon Henshaw, 2/21/2022</sub>
