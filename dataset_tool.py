@@ -18,6 +18,7 @@ import re
 import sys
 import tarfile
 import zipfile
+import spect
 from pathlib import Path
 from typing import Callable, Optional, Tuple, Union
 
@@ -62,7 +63,7 @@ def file_ext(name: Union[str, Path]) -> str:
 
 def is_image_ext(fname: Union[str, Path]) -> bool:
     ext = file_ext(fname).lower()
-    return f'.{ext}' in PIL.Image.EXTENSION # type: ignore
+    return f'.{ext}' == '.wav'
 
 #----------------------------------------------------------------------------
 
@@ -86,12 +87,26 @@ def open_image_folder(source_dir, *, max_images: Optional[int]):
         for idx, fname in enumerate(input_images):
             arch_fname = os.path.relpath(fname, source_dir)
             arch_fname = arch_fname.replace('\\', '/')
-            img = np.array(PIL.Image.open(fname))
+            img = spect.WAVtoARR(fname)
             yield dict(img=img, label=labels.get(arch_fname))
             if idx >= max_idx-1:
                 break
     return max_idx, iterate_images()
 
+#----------------------------------------------------------------------------
+def getSquareNPY(img_arr):
+    if isinstance(img_arr,str):
+        img_arr = np.load(img_arr,allow_pickle=False)
+    elif isinstance(img_arr,zipfile.ZipExtFile):
+        img_arr = np.load(img_arr,allow_pickle=False)
+    if len(img_arr.shape) < 3: #Something went wrong with .npy
+        #Remove metadata:
+        #tru_len = int(2**(int(np.log2(len(img_arr)))))
+        #meta_len = len(img_arr) - tru_len
+        #res = int( np.sqrt(tru_len//4) )
+        #Reshape
+        img_arr = (img_arr[len(img_arr) - 1048576:]).reshape(512,512,4)
+    return img_arr
 #----------------------------------------------------------------------------
 
 def open_image_zip(source, *, max_images: Optional[int]):
@@ -114,101 +129,10 @@ def open_image_zip(source, *, max_images: Optional[int]):
         with zipfile.ZipFile(source, mode='r') as z:
             for idx, fname in enumerate(input_images):
                 with z.open(fname, 'r') as file:
-                    img = PIL.Image.open(file) # type: ignore
-                    img = np.array(img)
+                    img = getSquareNPY(file)
                 yield dict(img=img, label=labels.get(fname))
                 if idx >= max_idx-1:
                     break
-    return max_idx, iterate_images()
-
-#----------------------------------------------------------------------------
-
-def open_lmdb(lmdb_dir: str, *, max_images: Optional[int]):
-    import cv2  # pip install opencv-python # pylint: disable=import-error
-    import lmdb  # pip install lmdb # pylint: disable=import-error
-
-    with lmdb.open(lmdb_dir, readonly=True, lock=False).begin(write=False) as txn:
-        max_idx = maybe_min(txn.stat()['entries'], max_images)
-
-    def iterate_images():
-        with lmdb.open(lmdb_dir, readonly=True, lock=False).begin(write=False) as txn:
-            for idx, (_key, value) in enumerate(txn.cursor()):
-                try:
-                    try:
-                        img = cv2.imdecode(np.frombuffer(value, dtype=np.uint8), 1)
-                        if img is None:
-                            raise IOError('cv2.imdecode failed')
-                        img = img[:, :, ::-1] # BGR => RGB
-                    except IOError:
-                        img = np.array(PIL.Image.open(io.BytesIO(value)))
-                    yield dict(img=img, label=None)
-                    if idx >= max_idx-1:
-                        break
-                except:
-                    print(sys.exc_info()[1])
-
-    return max_idx, iterate_images()
-
-#----------------------------------------------------------------------------
-
-def open_cifar10(tarball: str, *, max_images: Optional[int]):
-    images = []
-    labels = []
-
-    with tarfile.open(tarball, 'r:gz') as tar:
-        for batch in range(1, 6):
-            member = tar.getmember(f'cifar-10-batches-py/data_batch_{batch}')
-            with tar.extractfile(member) as file:
-                data = pickle.load(file, encoding='latin1')
-            images.append(data['data'].reshape(-1, 3, 32, 32))
-            labels.append(data['labels'])
-
-    images = np.concatenate(images)
-    labels = np.concatenate(labels)
-    images = images.transpose([0, 2, 3, 1]) # NCHW -> NHWC
-    assert images.shape == (50000, 32, 32, 3) and images.dtype == np.uint8
-    assert labels.shape == (50000,) and labels.dtype in [np.int32, np.int64]
-    assert np.min(images) == 0 and np.max(images) == 255
-    assert np.min(labels) == 0 and np.max(labels) == 9
-
-    max_idx = maybe_min(len(images), max_images)
-
-    def iterate_images():
-        for idx, img in enumerate(images):
-            yield dict(img=img, label=int(labels[idx]))
-            if idx >= max_idx-1:
-                break
-
-    return max_idx, iterate_images()
-
-#----------------------------------------------------------------------------
-
-def open_mnist(images_gz: str, *, max_images: Optional[int]):
-    labels_gz = images_gz.replace('-images-idx3-ubyte.gz', '-labels-idx1-ubyte.gz')
-    assert labels_gz != images_gz
-    images = []
-    labels = []
-
-    with gzip.open(images_gz, 'rb') as f:
-        images = np.frombuffer(f.read(), np.uint8, offset=16)
-    with gzip.open(labels_gz, 'rb') as f:
-        labels = np.frombuffer(f.read(), np.uint8, offset=8)
-
-    images = images.reshape(-1, 28, 28)
-    images = np.pad(images, [(0,0), (2,2), (2,2)], 'constant', constant_values=0)
-    assert images.shape == (60000, 32, 32) and images.dtype == np.uint8
-    assert labels.shape == (60000,) and labels.dtype == np.uint8
-    assert np.min(images) == 0 and np.max(images) == 255
-    assert np.min(labels) == 0 and np.max(labels) == 9
-
-    max_idx = maybe_min(len(images), max_images)
-
-    def iterate_images():
-        for idx, img in enumerate(images):
-            yield dict(img=img, label=int(labels[idx]))
-            if idx >= max_idx-1:
-                break
-
     return max_idx, iterate_images()
 
 #----------------------------------------------------------------------------
@@ -223,18 +147,35 @@ def make_transform(
         h = img.shape[0]
         if width == w and height == h:
             return img
-        img = PIL.Image.fromarray(img)
         ww = width if width is not None else w
         hh = height if height is not None else h
-        img = img.resize((ww, hh), PIL.Image.LANCZOS)
-        return np.array(img)
+
+        #Interpolate vertically
+        nu_img = np.empty((hh,w,4))
+        ol_h = np.arange(h)
+        new_h = np.linspace(0,h-1,num=hh)
+        for col in range(w):
+            nu_img[:,col,0] = np.interp(new_h, ol_h, img[:,col,0])
+            nu_img[:,col,1] = np.interp(new_h, ol_h, img[:,col,1])
+            nu_img[:,col,2] = np.interp(new_h, ol_h, img[:,col,2])
+            nu_img[:,col,3] = np.interp(new_h, ol_h, img[:,col,3])
+        
+        #Interpolate horizontally
+        nu_img2 = np.empty((hh,ww,4))
+        ol_w = np.arange(w)
+        new_w = np.linspace(0,w-1,num=ww)
+        for row in range(hh):
+            nu_img2[row,:,0] = np.interp(new_w, ol_w, nu_img[row,:,0])
+            nu_img2[row,:,1] = np.interp(new_w, ol_w, nu_img[row,:,1])
+            nu_img2[row,:,2] = np.interp(new_w, ol_w, nu_img[row,:,2])
+            nu_img2[row,:,3] = np.interp(new_w, ol_w, nu_img[row,:,3])
+
+        return nu_img2
 
     def center_crop(width, height, img):
         crop = np.min(img.shape[:2])
         img = img[(img.shape[0] - crop) // 2 : (img.shape[0] + crop) // 2, (img.shape[1] - crop) // 2 : (img.shape[1] + crop) // 2]
-        img = PIL.Image.fromarray(img, 'RGB')
-        img = img.resize((width, height), PIL.Image.LANCZOS)
-        return np.array(img)
+        return scale(width, height, img)
 
     def center_crop_wide(width, height, img):
         ch = int(np.round(width * img.shape[0] / img.shape[1]))
@@ -242,11 +183,9 @@ def make_transform(
             return None
 
         img = img[(img.shape[0] - ch) // 2 : (img.shape[0] + ch) // 2]
-        img = PIL.Image.fromarray(img, 'RGB')
-        img = img.resize((width, height), PIL.Image.LANCZOS)
-        img = np.array(img)
+        img = scale(width, height, img)
 
-        canvas = np.zeros([width, width, 3], dtype=np.uint8)
+        canvas = np.zeros([width, width, 4])
         canvas[(width - height) // 2 : (width + height) // 2, :] = img
         return canvas
 
@@ -390,7 +329,7 @@ def convert_dataset(
         --transform=center-crop-wide --resolution=512x384
     """
 
-    PIL.Image.init() # type: ignore
+    #PIL.Image.init() # type: ignore
 
     if dest == '':
         ctx.fail('--dest output filename or directory must not be an empty string')
@@ -406,7 +345,7 @@ def convert_dataset(
     labels = []
     for idx, image in tqdm(enumerate(input_iter), total=num_files):
         idx_str = f'{idx:08d}'
-        archive_fname = f'{idx_str[:5]}/img{idx_str}.png'
+        archive_fname = f'{idx_str[:5]}/img{idx_str}.npy'
 
         # Apply crop and resize.
         img = transform_image(image['img'])
@@ -417,7 +356,7 @@ def convert_dataset(
 
         # Error check to require uniform image attributes across
         # the whole dataset.
-        channels = img.shape[2] if img.ndim == 3 else 1
+        channels = 4
         cur_image_attrs = {
             'width': img.shape[1],
             'height': img.shape[0],
@@ -429,26 +368,28 @@ def convert_dataset(
             height = dataset_attrs['height']
             if width != height:
                 error(f'Image dimensions after scale and crop are required to be square.  Got {width}x{height}')
-            if dataset_attrs['channels'] not in [1, 3]:
-                error('Input images must be stored as RGB or grayscale')
+            if dataset_attrs['channels'] != 4:
+                error('Spectrogram must have 4 channels')
             if width != 2 ** int(np.floor(np.log2(width))):
                 error('Image width/height after scale and crop are required to be power-of-two')
         elif dataset_attrs != cur_image_attrs:
             err = [f'  dataset {k}/cur image {k}: {dataset_attrs[k]}/{cur_image_attrs[k]}' for k in dataset_attrs.keys()] # pylint: disable=unsubscriptable-object
             error(f'Image {archive_fname} attributes must be equal across all images of the dataset.  Got:\n' + '\n'.join(err))
 
-        # Save the image as an uncompressed PNG.
-        img = PIL.Image.fromarray(img, { 1: 'L', 3: 'RGB' }[channels])
+        # Save the image to the zipfile as an uncompressed bytestring.
+        ##OG: img = PIL.Image.fromarray(img, { 1: 'L', 3: 'RGB' }[channels])
         image_bits = io.BytesIO()
-        img.save(image_bits, format='png', compress_level=0, optimize=False)
+        np.save(image_bits, img, allow_pickle=False) ##OG: img.save(image_bits, format='png', compress_level=0, optimize=False)
         save_bytes(os.path.join(archive_root_dir, archive_fname), image_bits.getbuffer())
         labels.append([archive_fname, image['label']] if image['label'] is not None else None)
 
     metadata = {
         'labels': labels if all(x is not None for x in labels) else None
     }
-    save_bytes(os.path.join(archive_root_dir, 'dataset.json'), json.dumps(metadata))
+    #forgetting the labels
+    #save_bytes(os.path.join(archive_root_dir, 'dataset.json'), json.dumps(metadata))
     close_dest()
+    
 
 #----------------------------------------------------------------------------
 

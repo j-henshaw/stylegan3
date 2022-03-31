@@ -15,8 +15,8 @@ from typing import List, Optional, Tuple, Union
 import click
 import dnnlib
 import numpy as np
-import PIL.Image
 import torch
+import spect
 
 import legacy
 
@@ -133,8 +133,11 @@ def generate_images(
             G.synthesis.input.transform.copy_(torch.from_numpy(m))
 
         img = G(z, label, truncation_psi=truncation_psi, noise_mode=noise_mode)
-        img = (img.permute(0, 2, 3, 1) * 127.5 + 128).clamp(0, 255).to(torch.uint8)
-        PIL.Image.fromarray(img[0].cpu().numpy(), 'RGB').save(f'{outdir}/seed{seed:04d}.png')
+        img = img.permute(0, 2, 3, 1) #NCHW —> NHWC
+        for n in range(img.shape[0]):
+            spect.ARRtoWAV(np.asarray(img[n,:,:,:].detach().to("cpu")), f"{outdir}/Gen{n+seed_idx+n*seed_idx}")
+            spect.ARRtoPNG(np.asarray(img[n,:,:,:].detach().to("cpu")), f"{outdir}/Gen{n+seed_idx+n*seed_idx}",44100)
+        #PIL.Image.fromarray(img[0].cpu().numpy(), 'RGB').save(f'{outdir}/seed{seed:04d}.png')
 
 
 #----------------------------------------------------------------------------
