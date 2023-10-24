@@ -70,6 +70,15 @@ def translate3d(tx, ty, tz, **kwargs):
         [0, 0, 0, 1],
         **kwargs)
 
+def translate4d(tx, ty, tz, tw, **kwargs):
+    return matrix(
+        [1, 0, 0, 0, tx],
+        [0, 1, 0, 0, ty],
+        [0, 0, 1, 0, tz],
+        [0, 0, 0, 1, tw],
+        [0, 0, 0, 0, 1],
+        **kwargs)
+
 def scale2d(sx, sy, **kwargs):
     return matrix(
         [sx, 0,  0],
@@ -83,6 +92,15 @@ def scale3d(sx, sy, sz, **kwargs):
         [0,  sy, 0,  0],
         [0,  0,  sz, 0],
         [0,  0,  0,  1],
+        **kwargs)
+
+def scale4d(sx, sy, sz, sw, **kwargs):
+    return matrix(
+        [sx, 0,  0,  0, 0],
+        [0,  sy, 0,  0, 0],
+        [0,  0,  sz, 0, 0],
+        [0,  0,  0, sw, 0],
+        [0,  0,  0, 0,  1],
         **kwargs)
 
 def rotate2d(theta, **kwargs):
@@ -100,6 +118,19 @@ def rotate3d(v, theta, **kwargs):
         [vy*vx*cc+vz*s, vy*vy*cc+c,    vy*vz*cc-vx*s, 0],
         [vz*vx*cc-vy*s, vz*vy*cc+vx*s, vz*vz*cc+c,    0],
         [0,             0,             0,             1],
+        **kwargs)
+
+def rotate4d(v, theta, **kwargs):
+    #[x,y,z,w] ∧ [x,y,-z,-w]
+    v = v/torch.linalg.norm(v)
+    xz = 2*v[..., 0]*v[..., 2]*theta; xw = 2*v[..., 0]*v[..., 3]*theta
+    yz = 2*v[..., 1]*v[..., 2]*theta; yw = 2*v[..., 1]*v[..., 3]*theta
+    return matrix(
+        [0, 0, torch.exp(-xz), torch.exp(-xw), 0],
+        [0, 0, torch.exp(-yz), torch.exp(-yw), 0],
+        [torch.exp(xz), torch.exp(yz),   0, 0, 0],
+        [torch.exp(xw), torch.exp(yw),   0, 0, 0],
+        [0, 0,                           0, 0, 1],
         **kwargs)
 
 def translate2d_inv(tx, ty, **kwargs):
@@ -123,7 +154,7 @@ class AugmentPipe(torch.nn.Module):
     def __init__(self,
         xflip=0, rotate90=0, xint=0, xint_max=0.125,
         scale=0, rotate=0, aniso=0, xfrac=0, scale_std=0.2, rotate_max=1, aniso_std=0.2, xfrac_std=0.125,
-        brightness=0, contrast=0, lumaflip=0, hue=0, saturation=0, brightness_std=0.2, contrast_std=0.5, hue_max=1, saturation_std=1,
+        brightness=0, contrast=0, lumaflip=0, hue=0, saturation=0, brightness_std=0.2, contrast_std=0.5, hue_max=1, hue_min=1, saturation_std=1,
         imgfilter=0, imgfilter_bands=[1,1,1,1], imgfilter_std=1,
         noise=0, cutout=0, noise_std=0.1, cutout_size=0.5,
     ):
@@ -154,7 +185,8 @@ class AugmentPipe(torch.nn.Module):
         self.saturation       = float(saturation)       # Probability multiplier for saturation.
         self.brightness_std   = float(brightness_std)   # Standard deviation of brightness.
         self.contrast_std     = float(contrast_std)     # Log2 standard deviation of contrast.
-        self.hue_max          = float(hue_max)          # Range of hue rotation, 1 = full circle.
+        self.hue_max          = float(hue_max)          # Max magnitude of pos hue rotation, 1 = positive half-circle.
+        self.hue_min          = float(hue_min)          # Min magnitude of neg hue rotation, 1 = negative half-circle.
         self.saturation_std   = float(saturation_std)   # Log2 standard deviation of saturation.
 
         # Image-space filtering.
@@ -189,7 +221,7 @@ class AugmentPipe(torch.nn.Module):
         device = images.device
         if debug_percentile is not None:
             debug_percentile = torch.as_tensor(debug_percentile, dtype=torch.float32, device=device)
-
+        
         # -------------------------------------
         # Select parameters for pixel blitting.
         # -------------------------------------
@@ -309,9 +341,9 @@ class AugmentPipe(torch.nn.Module):
         # Select parameters for color transformations.
         # --------------------------------------------
 
-        # Initialize homogeneous 3D transformation matrix: C @ color_in ==> color_out
-        I_4 = torch.eye(4, device=device)
-        C = I_4
+        # Initialize homogeneous 4D transformation matrix: C @ color_in ==> color_out
+        I_5 = torch.eye(5, device=device)
+        C = I_5
 
         # Apply brightness with probability (brightness * strength).
         if self.brightness > 0:
@@ -319,7 +351,7 @@ class AugmentPipe(torch.nn.Module):
             b = torch.where(torch.rand([batch_size], device=device) < self.brightness * self.p, b, torch.zeros_like(b))
             if debug_percentile is not None:
                 b = torch.full_like(b, torch.erfinv(debug_percentile * 2 - 1) * self.brightness_std)
-            C = translate3d(b, b, b) @ C
+            C = translate4d(b, b, b, b) @ C
 
         # Apply contrast with probability (contrast * strength).
         if self.contrast > 0:
@@ -327,24 +359,24 @@ class AugmentPipe(torch.nn.Module):
             c = torch.where(torch.rand([batch_size], device=device) < self.contrast * self.p, c, torch.ones_like(c))
             if debug_percentile is not None:
                 c = torch.full_like(c, torch.exp2(torch.erfinv(debug_percentile * 2 - 1) * self.contrast_std))
-            C = scale3d(c, c, c) @ C
+            C = scale4d(c, c, c, c) @ C
 
         # Apply luma flip with probability (lumaflip * strength).
-        v = misc.constant(np.asarray([1, 1, 1, 0]) / np.sqrt(3), device=device) # Luma axis.
+        v = misc.constant(np.asarray([0.5, 0.5, 0.5, 0.5, 0]), device=device) # Luma axis.
         if self.lumaflip > 0:
             i = torch.floor(torch.rand([batch_size, 1, 1], device=device) * 2)
             i = torch.where(torch.rand([batch_size, 1, 1], device=device) < self.lumaflip * self.p, i, torch.zeros_like(i))
             if debug_percentile is not None:
                 i = torch.full_like(i, torch.floor(debug_percentile * 2))
-            C = (I_4 - 2 * v.ger(v) * i) @ C # Householder reflection.
+            C = (I_5 - 2 * v.ger(v) * i) @ C # Householder reflection.
 
         # Apply hue rotation with probability (hue * strength).
-        if self.hue > 0 and num_channels > 1:
-            theta = (torch.rand([batch_size], device=device) * 2 - 1) * np.pi * self.hue_max
+        if (self.hue > 0):
+            theta = (torch.rand([batch_size], device=device) * (self.hue_max + self.hue_min) - self.hue_min) * np.pi 
             theta = torch.where(torch.rand([batch_size], device=device) < self.hue * self.p, theta, torch.zeros_like(theta))
             if debug_percentile is not None:
-                theta = torch.full_like(theta, (debug_percentile * 2 - 1) * np.pi * self.hue_max)
-            C = rotate3d(v, theta) @ C # Rotate around v.
+                theta = torch.full_like(theta, (debug_percentile * (self.hue_max + self.hue_min) - self.hue_min)) * np.pi
+            C = rotate4d(v, theta, device=device) @ C
 
         # Apply saturation with probability (saturation * strength).
         if self.saturation > 0 and num_channels > 1:
@@ -352,22 +384,21 @@ class AugmentPipe(torch.nn.Module):
             s = torch.where(torch.rand([batch_size, 1, 1], device=device) < self.saturation * self.p, s, torch.ones_like(s))
             if debug_percentile is not None:
                 s = torch.full_like(s, torch.exp2(torch.erfinv(debug_percentile * 2 - 1) * self.saturation_std))
-            C = (v.ger(v) + (I_4 - v.ger(v)) * s) @ C
+            C = (v.ger(v) + (I_5 - v.ger(v)) * s) @ C
 
         # ------------------------------
         # Execute color transformations.
         # ------------------------------
 
         # Execute if the transform is not identity.
-        if C is not I_4:
+        if torch.norm(C - I_5) > (2 * torch.finfo(torch.float32).eps):
+            print(end=" ")
             images = images.reshape([batch_size, num_channels, height * width])
-            if num_channels == 3:
-                images = C[:, :3, :3] @ images + C[:, :3, 3:]
-            elif num_channels == 1:
-                C = C[:, :3, :].mean(dim=1, keepdims=True)
-                images = images * C[:, :, :3].sum(dim=2, keepdims=True) + C[:, :, 3:]
+            if num_channels == 4:
+                #We spectrogrammin
+                images = C[:, :4, :4] @ images + C[:, :4, 4:]
             else:
-                raise ValueError('Image must be RGB (3 channels) or L (1 channel)')
+                raise ValueError('SPECT can only be 4 channel :D')
             images = images.reshape([batch_size, num_channels, height, width])
 
         # ----------------------
@@ -430,6 +461,8 @@ class AugmentPipe(torch.nn.Module):
             mask_y = (((coord_y + 0.5) / height - center[:, 1]).abs() >= size[:, 1] / 2)
             mask = torch.logical_or(mask_x, mask_y).to(torch.float32)
             images = images * mask
+        
+        print(". . . ",end='')
 
         return images
 
